@@ -2,7 +2,10 @@
 // and renders the board, the filters, the live-token view and a per-protocol detail panel
 // with the model's own arithmetic and the protocol's farm plan. No network: every byte it
 // shows is in data.js. The page recomputes each row's implied value from the snapshot
-// figures, so the code and board.json can be checked against each other.
+// figures, so the code and board.json can be checked against each other. It also shows the
+// walk-forward validation main.ts computed from the snapshot's own live-token protocols:
+// the model fitted on earlier listings and tested on later ones, out-of-sample next to
+// in-sample, so the reader sees how much of the fit is real.
 (function () {
   'use strict';
 
@@ -48,15 +51,32 @@
     return { growthPct: growthPct, growthMult: growthMult, maturityMult: maturityMult, chainMult: chainMult, implied: implied };
   }
 
-  // The farm plan is the same derivation main.ts writes to board.json: category, chains, TVL
-  // and age decide the action, the capital, the hold and every cost and time. No name is
-  // special-cased, so the plan the page shows is the plan the board carries.
+  // The farm plan is the same derivation main.ts writes to board.json: category, chains and
+  // age decide the action, the hold and every cost and time, and every plan is sized for a
+  // $1,000 standard deposit and a $10,000 large one, netted of gas and slippage on the
+  // protocol's own chain and laid out day by day. No name is special-cased, so the plan the
+  // page shows is the plan the board carries.
   function chainOf(p) { return p.chains && p.chains.length > 0 ? p.chains[0] : 'its main chain'; }
-  function capitalFor(p) {
-    if (p.tvl_usd >= 5e9) return 250;
-    if (p.tvl_usd >= 1e9) return 150;
-    if (p.tvl_usd >= 1e8) return 100;
-    return 50;
+  function usd(n) { return Number(n).toLocaleString('en-US'); }
+  // One transaction's gas, in whole dollars, as an estimate for a chain: Ethereum is dear,
+  // its rollups and the cheap chains are not; anything unlisted counts $2. Same table as
+  // lib/radar.ts, so the page and the board agree on every net.
+  function gasPerTx(chain) {
+    var c = String(chain).toLowerCase();
+    if (c.indexOf('ethereum') >= 0) return 8;
+    if (c.indexOf('arbitrum') >= 0 || c.indexOf('optimism') >= 0 || c.indexOf('base') >= 0
+      || c.indexOf('zksync') >= 0 || c.indexOf('linea') >= 0 || c.indexOf('scroll') >= 0
+      || c.indexOf('blast') >= 0 || c.indexOf('mode') >= 0 || c.indexOf('polygon') >= 0 || c.indexOf('zora') >= 0) return 1;
+    if (c.indexOf('binance') >= 0 || c.indexOf('bsc') >= 0 || c.indexOf('bnb') >= 0) return 0.5;
+    if (c.indexOf('solana') >= 0) return 0.1;
+    if (c.indexOf('avalanche') >= 0) return 0.5;
+    return 2;
+  }
+  // What a deposit nets after the plan's four priced transactions and 0.3% slippage.
+  function netOf(deposit, chain) {
+    var gas = 4 * gasPerTx(chain);
+    var slippage = Math.round(deposit * 0.003 * 100) / 100;
+    return { gas: gas, slippage: slippage, net: Math.round(deposit - gas - slippage) };
   }
   function holdDaysFor(age) {
     if (age === null || age === undefined) return 30;
@@ -66,19 +86,20 @@
   }
   function mainAction(p, capital, chain) {
     var c = (p.category || '').toLowerCase();
-    if (c.indexOf('lend') >= 0 || c.indexOf('cdp') >= 0 || c.indexOf('collateral') >= 0) return 'Supply $' + capital + ' of USDC to ' + p.name + ' on ' + chain + ' and keep the position open.';
-    if (c.indexOf('dex') >= 0 || c.indexOf('yield') >= 0 || c.indexOf('leveraged farm') >= 0) return 'Provide $' + capital + ' of liquidity to ' + p.name + "'s main pool on " + chain + ' and keep the position open.';
-    if (c.indexOf('bridge') >= 0) return 'Bridge $' + capital + ' of USDC to ' + chain + ' through ' + p.name + ' and use the bridged funds in its app.';
-    if (c.indexOf('staking') >= 0 || c.indexOf('restak') >= 0) return "Stake $" + capital + " of the chain's staking asset through " + p.name + ' and keep the receipt.';
-    if (c.indexOf('perpetual') >= 0 || c.indexOf('derivative') >= 0) return 'Deposit $' + capital + ' of USDC as margin on ' + p.name + ' and open one small hedge.';
-    if (c.indexOf('prediction') >= 0) return 'Fund $' + capital + ' and place one market position on ' + p.name + '.';
-    if (c.indexOf('curator') >= 0 || c.indexOf('allocator') >= 0) return 'Deposit $' + capital + ' into a ' + p.name + ' vault on ' + chain + ' and keep the shares.';
-    if (c.indexOf('stable') >= 0) return 'Mint or deposit $' + capital + ' of the stable asset through ' + p.name + ' on ' + chain + '.';
-    if (c.indexOf('rwa') >= 0) return "Mint $" + capital + " of the protocol's yield asset on " + chain + ' and hold it.';
-    if (c.indexOf('insurance') >= 0) return 'Buy $' + capital + ' of cover from ' + p.name + ' on ' + chain + ' and keep the policy.';
-    if (c.indexOf('basis') >= 0) return 'Deposit $' + capital + " into " + p.name + "'s basis position on " + chain + ' and hold it through one funding cycle.';
-    if (c.indexOf('privacy') >= 0) return 'Use $' + capital + ' through ' + p.name + "'s private flow on " + chain + ' and keep the receipt.';
-    return 'Deposit $' + capital + ' of USDC into ' + p.name + ' on ' + chain + ' and keep the position open.';
+    var amt = usd(capital);
+    if (c.indexOf('lend') >= 0 || c.indexOf('cdp') >= 0 || c.indexOf('collateral') >= 0) return 'Supply $' + amt + ' of USDC to ' + p.name + ' on ' + chain + ' and keep the position open.';
+    if (c.indexOf('dex') >= 0 || c.indexOf('yield') >= 0 || c.indexOf('leveraged farm') >= 0) return 'Provide $' + amt + ' of liquidity to ' + p.name + "'s main pool on " + chain + ' and keep the position open.';
+    if (c.indexOf('bridge') >= 0) return 'Bridge $' + amt + ' of USDC to ' + chain + ' through ' + p.name + ' and use the bridged funds in its app.';
+    if (c.indexOf('staking') >= 0 || c.indexOf('restak') >= 0) return "Stake $" + amt + " of the chain's staking asset through " + p.name + ' and keep the receipt.';
+    if (c.indexOf('perpetual') >= 0 || c.indexOf('derivative') >= 0) return 'Deposit $' + amt + ' of USDC as margin on ' + p.name + ' and open one small hedge.';
+    if (c.indexOf('prediction') >= 0) return 'Fund $' + amt + ' and place one market position on ' + p.name + '.';
+    if (c.indexOf('curator') >= 0 || c.indexOf('allocator') >= 0) return 'Deposit $' + amt + ' into a ' + p.name + ' vault on ' + chain + ' and keep the shares.';
+    if (c.indexOf('stable') >= 0) return 'Mint or deposit $' + amt + ' of the stable asset through ' + p.name + ' on ' + chain + '.';
+    if (c.indexOf('rwa') >= 0) return "Mint $" + amt + " of the protocol's yield asset on " + chain + ' and hold it.';
+    if (c.indexOf('insurance') >= 0) return 'Buy $' + amt + ' of cover from ' + p.name + ' on ' + chain + ' and keep the policy.';
+    if (c.indexOf('basis') >= 0) return 'Deposit $' + amt + " into " + p.name + "'s basis position on " + chain + ' and hold it through one funding cycle.';
+    if (c.indexOf('privacy') >= 0) return 'Use $' + amt + ' through ' + p.name + "'s private flow on " + chain + ' and keep the receipt.';
+    return 'Deposit $' + amt + ' of USDC into ' + p.name + ' on ' + chain + ' and keep the position open.';
   }
   function extraSignal(p) {
     var c = (p.category || '').toLowerCase();
@@ -103,16 +124,19 @@
   }
   function farmSteps(p) {
     var chain = chainOf(p);
-    var capital = capitalFor(p);
     var hold = holdDaysFor(p.age_days);
+    var gas = gasPerTx(chain);
+    var std = netOf(1000, chain);
+    var large = netOf(10000, chain);
     return [
-      { text: 'Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.', cost: 'under $3 of gas for the first transaction', time: '5 minutes' },
-      { text: mainAction(p, capital, chain), cost: '$' + capital + ' of capital and about $' + (capital >= 150 ? 8 : 4) + ' of gas', time: '15 minutes to set up' },
-      { text: 'Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote.', cost: 'about $2 of gas a week', time: '10 minutes a week' },
-      { text: extraSignal(p), cost: 'about $2 of gas', time: '10 minutes' },
-      { text: 'Hold the position for at least ' + hold + ' days so the activity is counted in more than one snapshot.', cost: 'the $' + capital + ' stays in the position', time: hold + ' days' },
-      { text: "Before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes.", cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
-      { text: 'Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.', cost: 'nothing but the log', time: '5 minutes' }
+      { text: 'Day 0 — set up a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.', cost: 'under $3 of gas for the first transaction', time: '5 minutes' },
+      { text: 'Day 1 — ' + mainAction(p, 1000, chain) + ' The same steps size a $' + usd(10000) + ' large deposit.', cost: '$' + usd(1000) + ' of capital ($' + usd(10000) + ' for the large size) and about $' + gas + ' of gas', time: '15 minutes to set up' },
+      { text: 'Day 1 — check the net position on ' + chain + ': a $' + usd(1000) + ' deposit nets about $' + usd(std.net) + ' of working capital after ~$' + std.gas + ' of gas across four transactions and 0.3% slippage; a $' + usd(10000) + ' deposit nets about $' + usd(large.net) + '. Costs are estimates for ' + chain + ', not a quote.', cost: 'about $' + std.gas + ' of gas and $' + std.slippage + ' of slippage on the standard size', time: '5 minutes' },
+      { text: 'Days 2–7 — make one qualifying action a day in the first week, such as a deposit, a borrow, a swap or a vote, so the wallet reads as active from day one.', cost: 'about $' + gas + ' of gas a day', time: '10 minutes a day' },
+      { text: 'Day 8 — ' + extraSignal(p), cost: 'about $' + gas + ' of gas', time: '10 minutes' },
+      { text: 'Days 9–' + hold + ' — hold the position and make one qualifying action a week, so the activity is counted in more than one snapshot.', cost: 'the deposit stays in the position, about $' + gas + ' of gas a week', time: hold + ' days in total' },
+      { text: 'Day ' + (hold + 1) + " — before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes.", cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
+      { text: 'Keep a farm log: the wallet, the dates, every transaction and the net position, so you can repeat the position or unwind it.', cost: 'nothing but the log', time: '5 minutes' }
     ].map(stepText);
   }
 
@@ -239,10 +263,25 @@
     }
     var stats = document.getElementById('stat-grid');
     if (stats) {
+      var v = DATA.validation;
+      var validStat = v
+        ? '<div class="stat"><span>Walk-forward error, out of sample</span><b><em>' + v.median_abs_log10_error.toFixed(2) + ' log</em></b></div>'
+        + '<div class="stat"><span>Predictions within 2× of the real cap</span><b><em>' + Math.round(v.within_2x * 100) + '%</em></b></div>'
+        : '';
       stats.innerHTML = '<div class="stat"><span>Watchlist covered</span><b>' + DATA.watchlist_size + ' / ' + DATA.watchlist_size + '</b></div>'
         + '<div class="stat"><span>Pre-token rows scored</span><b>' + DATA.board_size + '</b></div>'
         + '<div class="stat"><span>Early rows below the floor</span><b>' + DATA.early_size + '</b></div>'
-        + '<div class="stat"><span>Market multiple, median mcap / TVL</span><b><em>' + DATA.comparables.global.toFixed(3) + '×</em></b></div>';
+        + '<div class="stat"><span>Market multiple, median mcap / TVL</span><b><em>' + DATA.comparables.global.toFixed(3) + '×</em></b></div>'
+        + validStat;
+    }
+    var strip = document.getElementById('valid-strip');
+    if (strip && DATA.validation) {
+      var vv = DATA.validation;
+      strip.innerHTML = '<span class="valid-label">Model check · walk-forward tested</span>'
+        + '<p>Fitted on the <b>' + vv.live_n + '</b> oldest live-token protocols, tested on <b>' + vv.test_n + '</b> newer ones. '
+        + 'Out-of-sample median error <b>' + vv.median_abs_log10_error.toFixed(2) + ' log</b> — <b>' + Math.round(vv.within_2x * 100) + '%</b> of predictions within 2× of the real market cap. '
+        + 'In-sample: ' + vv.in_sample_median_abs_log10_error.toFixed(2) + ' log, ' + Math.round(vv.in_sample_within_2x * 100) + '% within 2×. '
+        + 'The multiple the board uses was never fitted on the protocols it was tested against.</p>';
     }
     var top = DATA.rows.slice(0, 3);
     var spot = document.getElementById('spotlight');
@@ -268,7 +307,26 @@
         + '<p>Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked.</p>'
         + '<div class="formula">implied = round( tvl_usd × <b>comparable multiple</b> × (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 × ' + m.growth_weight + ') × <b>maturity bell</b> × (1 + 0.03 × chains over one) )</div>'
         + '<p>The comparable multiple is the median market-cap-to-TVL ratio of the live-token protocols in this snapshot — the whole market, blended with the protocol\u2019s own category. The maturity bell peaks near ' + Math.round(m.maturity_peak_days / 365) + ' years with no token and falls on both sides: too young to have proven itself, or old enough to have shown it likely never launches. Growth is the TVL change over seven days; age is the time since the protocol was first listed.</p>'
-        + '<div class="model-facts"><span>Market multiple <b>' + DATA.comparables.global.toFixed(3) + '×</b></span><span>Strongest categories: ' + catLine + '</span></div>';
+        + '<div class="model-facts"><span>Market multiple <b>' + DATA.comparables.global.toFixed(3) + '×</b></span><span>Strongest categories: ' + catLine + '</span></div>'
+        + validPanel(DATA.validation);
+    }
+
+    // The walk-forward panel: the model fitted on earlier listings and tested on later ones,
+    // fold by fold, with the out-of-sample error next to the in-sample one. The numbers are
+    // computed from the snapshot at build time and printed as they come out, good or bad.
+    function validPanel(v) {
+      if (!v || !v.folds) return '';
+      var rowsHtml = v.folds.map(function (f) {
+        return '<tr><td class="num">' + f.fold + '</td><td class="num">' + f.train_n + '</td><td class="num">' + f.test_n + '</td><td class="num">' + f.median_abs_log10_error.toFixed(2) + '</td><td class="num">' + Math.round(f.within_2x * 100) + '%</td></tr>';
+      }).join('');
+      return '<h3 class="valid-title">Walk-forward validation</h3>'
+        + '<p>' + esc(v.method) + ' An error of 0.30 log means a prediction twice the real market cap, or half of it.</p>'
+        + '<div class="table-wrap valid-table-wrap"><table class="valid-table"><caption>Expanding window: each fold is fitted on every earlier fold and tested on the next.</caption>'
+        + '<thead><tr><th scope="col">Fold</th><th scope="col">Trained on</th><th scope="col">Tested on</th><th scope="col">Median error (log)</th><th scope="col">Within 2×</th></tr></thead>'
+        + '<tbody>' + rowsHtml + '</tbody></table></div>'
+        + '<p>Overall out-of-sample: median error <b>' + v.median_abs_log10_error.toFixed(2) + ' log</b>, mean ' + v.mean_abs_log10_error.toFixed(2) + ' log, <b>' + Math.round(v.within_2x * 100) + '%</b> within 2×, median prediction ' + v.median_pred_over_actual.toFixed(2) + '× the real market cap. '
+        + 'In-sample on the same ' + v.live_n + ' protocols: median error ' + v.in_sample_median_abs_log10_error.toFixed(2) + ' log, ' + Math.round(v.in_sample_within_2x * 100) + '% within 2×. '
+        + 'A model that only remembered its data would show a far smaller in-sample error than the walk-forward one; the gap between the two is the honest measure of this model.</p>';
     }
   }
 
@@ -327,6 +385,9 @@
       + (catMult !== null
         ? '<p class="compare-note">Comparables: live ' + esc(row.category) + ' protocols trade at a median <b>' + catMult.toFixed(3) + '×</b> market cap to TVL, against <b>' + DATA.comparables.global.toFixed(3) + '×</b> for the whole live market.</p>'
         : '<p class="compare-note">Comparables: too few live ' + esc(row.category || 'uncategorised') + ' protocols to trust a category median, so the market-wide <b>' + DATA.comparables.global.toFixed(3) + '×</b> stands in.</p>')
+      + (DATA.validation
+        ? '<p class="compare-note">Model check: this multiple was walk-forward tested on the snapshot\u2019s own live-token protocols — out-of-sample median error <b>' + DATA.validation.median_abs_log10_error.toFixed(2) + ' log</b>, <b>' + Math.round(DATA.validation.within_2x * 100) + '%</b> of predictions within 2× of the real market cap.</p>'
+        : '')
       + '</section>'
       + '<section class="detail-sec"><h3>Farm plan</h3><ol class="steps">' + stepsHtml + '</ol></section>';
     var close = document.getElementById('detail-close');

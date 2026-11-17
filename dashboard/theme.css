@@ -79,6 +79,20 @@ button { cursor: pointer; }
 .stat b { display: block; font-family: var(--font-num); font-size: 20px; font-weight: 650; margin-top: 3px; }
 .stat b em { font-style: normal; color: var(--amber); }
 
+/* Validation strip: the walk-forward result, visible above the board */
+.valid-strip {
+  display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap;
+  background: linear-gradient(160deg, var(--panel-2), var(--panel));
+  border: 1px solid var(--line); border-left: 3px solid var(--amber);
+  border-radius: var(--radius); padding: 14px 18px; margin-bottom: 22px;
+}
+.valid-label {
+  font-family: var(--font-num); font-size: 12px; letter-spacing: 0.1em;
+  color: var(--amber); text-transform: uppercase; white-space: nowrap;
+}
+.valid-strip p { color: var(--muted); font-size: 13.5px; flex: 1 1 420px; }
+.valid-strip p b { color: var(--ink); }
+
 /* Spotlight: the top three, as cards */
 .spotlight { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 22px; }
 .spot {
@@ -175,6 +189,10 @@ tbody tr[data-open="true"] { background: var(--amber-soft); }
 .formula b { color: var(--amber); font-weight: 650; }
 .model-facts { display: flex; flex-wrap: wrap; gap: 8px 22px; font-family: var(--font-num); font-size: 12.5px; color: var(--muted); }
 .model-facts b { color: var(--ink); font-weight: 600; }
+.valid-title { margin-top: 8px; }
+.valid-table-wrap { border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; }
+.valid-table th, .valid-table td { padding: 8px 14px; }
+.valid-table caption { padding: 10px 14px 2px; }
 
 /* Footer */
 .foot { margin-top: 22px; color: var(--faint); font-size: 12.5px; display: grid; gap: 6px; }
