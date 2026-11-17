@@ -13,10 +13,15 @@
 //      has proven it can hold value without one, so it scores best; a brand-new one has not
 //      proven anything, and one that has run five years without a token has shown it likely
 //      never will. The curve peaks near two and a half years and falls on both sides.
+//   4. A model that is tested, not trusted. The same scoring function is walk-forward tested
+//      on the snapshot's own live-token protocols: fitted on the earlier listings, scored
+//      against the later ones, and the out-of-sample error is printed next to the in-sample
+//      one, so a reader sees how much of the fit is real.
 //
 // Every row also carries a farm plan derived from the protocol's own record (category, chains,
-// TVL, age). The dashboard recomputes the same numbers in the page, so the code and the board
-// can be checked against each other.
+// age): sized for a $1,000 standard deposit and a $10,000 large one, netted of gas and
+// slippage on the protocol's own chain, and laid out day by day. The dashboard recomputes
+// the same numbers in the page, so the code and the board can be checked against each other.
 
 /** One protocol as the sealed snapshot carries it: exactly its ten fields. */
 export interface SnapshotProtocol {
@@ -73,7 +78,17 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-2-comparables';
+export const MODEL_VERSION = 'radar-3-validated';
+
+/** The two deposit sizes every farm plan is written for: a standard farm and a large one. */
+export const STANDARD_DEPOSIT_USD = 1_000;
+export const LARGE_DEPOSIT_USD = 10_000;
+
+/** Slippage assumed on a deposit, as a share: an estimate, labelled as one wherever shown. */
+export const SLIPPAGE_SHARE = 0.003;
+
+/** How many priced transactions a farm plan counts: deposit, first-week action, second signal, claim. */
+export const PRICED_TXS = 4;
 
 /** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
 export const EARLY_ROWS = 160;
@@ -125,10 +140,11 @@ export interface Comparables {
   byCategory: Record<string, number>;
 }
 
-export function comparables(snapshot: Snapshot): Comparables {
-  const live = snapshot.protocols.filter(
-    (p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0 && p.category !== 'CEX',
-  );
+/** The comparables a list of live-token protocols gives: one market-cap-to-TVL multiple for
+ *  the whole list, and one per category where enough live protocols exist to trust the median.
+ *  The same function fits the board's multiple and every walk-forward training fold, so the
+ *  validation tests the model the board actually uses, not a second one. */
+export function comparablesFor(live: SnapshotProtocol[]): Comparables {
   const global = median(live.map((p) => p.mcap_usd! / p.tvl_usd));
   const groups = new Map<string, number[]>();
   for (const p of live) {
@@ -142,6 +158,13 @@ export function comparables(snapshot: Snapshot): Comparables {
     if (values.length >= MODEL.min_category_samples) byCategory[category] = median(values);
   }
   return { global, byCategory };
+}
+
+export function comparables(snapshot: Snapshot): Comparables {
+  const live = snapshot.protocols.filter(
+    (p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0 && p.category !== 'CEX',
+  );
+  return comparablesFor(live);
 }
 
 /** The multiple one protocol's TVL is worth: the geometric blend of the market's multiple and
@@ -193,6 +216,116 @@ export function scoreProtocol(p: SnapshotProtocol, asOf: string, comp: Comparabl
   const chainMult = breadthFactor(p.chains);
   const implied = Math.max(1, Math.round(p.tvl_usd * multiple * growthMult * maturityMult * chainMult));
   return { implied, multiple, growthPct: pct, growthMult, maturityMult, chainMult, age };
+}
+
+/** One walk-forward fold: the training protocols it fitted on, the held-out protocols it was
+ *  tested on, and how far its predictions landed from the market caps that actually trade. */
+export interface ValidationFold {
+  fold: number;
+  train_n: number;
+  test_n: number;
+  median_abs_log10_error: number;
+  within_2x: number;
+}
+
+/** The walk-forward report: out-of-sample error against the in-sample error, so a reader can
+ *  see how much of the model's fit is real and how much is the model remembering its own data. */
+export interface ValidationReport {
+  method: string;
+  live_n: number;
+  test_n: number;
+  median_abs_log10_error: number;
+  mean_abs_log10_error: number;
+  within_2x: number;
+  median_pred_over_actual: number;
+  in_sample_median_abs_log10_error: number;
+  in_sample_within_2x: number;
+  folds: ValidationFold[];
+}
+
+/** How many chronological folds the live-token protocols are cut into. */
+export const VALIDATION_FOLDS = 5;
+
+/** log10(2): a prediction within this log error is within twice the real market cap. */
+export const WITHIN_2X = 0.3010299956639812;
+
+/**
+ * Walk-forward validation of the value model, computed from the snapshot at runtime.
+ *
+ * The live-token protocols that carry a listing date are ordered oldest first and cut into
+ * five chronological folds. For each fold after the first, the comparables are fitted on the
+ * earlier folds only and the model predicts the fold's market caps from TVL, growth, age and
+ * chains — the same scoreProtocol the board uses. A prediction's error is log10 of predicted
+ * over actual market cap, so 0.30 means a factor of two. The in-sample numbers fit the
+ * comparables on every dated live protocol and score those same protocols, so they show what
+ * the model claims about data it has already seen. Nothing here is hardcoded: the numbers
+ * fall out of the snapshot, good or bad, and the dashboard prints them as they come out.
+ */
+export function validateModel(snapshot: Snapshot): ValidationReport {
+  const dated = snapshot.protocols
+    .filter(
+      (p) =>
+        p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0 && p.category !== 'CEX' && p.listed_at !== null,
+    )
+    .sort((a, b) =>
+      a.listed_at! < b.listed_at!
+        ? -1
+        : a.listed_at! > b.listed_at!
+          ? 1
+          : a.slug < b.slug
+            ? -1
+            : a.slug > b.slug
+              ? 1
+              : 0,
+    );
+  const n = dated.length;
+  const folds: SnapshotProtocol[][] = [];
+  const base = Math.floor(n / VALIDATION_FOLDS);
+  const extra = n % VALIDATION_FOLDS;
+  let at = 0;
+  for (let k = 0; k < VALIDATION_FOLDS; k++) {
+    const size = base + (k < extra ? 1 : 0);
+    folds.push(dated.slice(at, at + size));
+    at += size;
+  }
+  const testErrors: number[] = [];
+  const testRatios: number[] = [];
+  const foldReports: ValidationFold[] = [];
+  for (let k = 1; k < VALIDATION_FOLDS; k++) {
+    const train = folds.slice(0, k).flat();
+    const test = folds[k]!;
+    const trainComp = comparablesFor(train);
+    const errs: number[] = [];
+    for (const p of test) {
+      const pred = scoreProtocol(p, snapshot.as_of, trainComp).implied;
+      const err = Math.log10(pred / p.mcap_usd!);
+      errs.push(err);
+      testErrors.push(err);
+      testRatios.push(pred / p.mcap_usd!);
+    }
+    foldReports.push({
+      fold: k + 1,
+      train_n: train.length,
+      test_n: test.length,
+      median_abs_log10_error: round4(median(errs.map((e) => Math.abs(e)))),
+      within_2x: round4(errs.filter((e) => Math.abs(e) <= WITHIN_2X).length / errs.length),
+    });
+  }
+  const fullComp = comparables(snapshot);
+  const inSample = dated.map((p) => Math.log10(scoreProtocol(p, snapshot.as_of, fullComp).implied / p.mcap_usd!));
+  return {
+    method:
+      'Expanding-window walk-forward: live-token protocols ordered by listing date, the comparables fitted on earlier folds only and tested on the next fold.',
+    live_n: n,
+    test_n: testErrors.length,
+    median_abs_log10_error: round4(median(testErrors.map((e) => Math.abs(e)))),
+    mean_abs_log10_error: round4(testErrors.reduce((a, e) => a + Math.abs(e), 0) / testErrors.length),
+    within_2x: round4(testErrors.filter((e) => Math.abs(e) <= WITHIN_2X).length / testErrors.length),
+    median_pred_over_actual: round4(median(testRatios)),
+    in_sample_median_abs_log10_error: round4(median(inSample.map((e) => Math.abs(e)))),
+    in_sample_within_2x: round4(inSample.filter((e) => Math.abs(e) <= WITHIN_2X).length / inSample.length),
+    folds: foldReports,
+  };
 }
 
 /** Whether a protocol records no token at all. */
@@ -305,12 +438,34 @@ function chainOf(p: SnapshotProtocol): string {
   return p.chains.length > 0 ? p.chains[0]! : 'its main chain';
 }
 
-/** How much capital one farm position needs, from the protocol's own TVL. */
-function capitalFor(p: SnapshotProtocol): number {
-  if (p.tvl_usd >= 5_000_000_000) return 250;
-  if (p.tvl_usd >= 1_000_000_000) return 150;
-  if (p.tvl_usd >= 100_000_000) return 100;
-  return 50;
+/** One transaction's gas, in whole dollars, as an estimate for the protocol's first chain.
+ *  Ethereum is dear, its rollups and the cheap chains are not; anything unlisted counts $2.
+ *  An estimate, labelled as one wherever the plan shows it. */
+function gasPerTx(chain: string): number {
+  const c = chain.toLowerCase();
+  if (c.includes('ethereum')) return 8;
+  if (
+    c.includes('arbitrum') || c.includes('optimism') || c.includes('base') ||
+    c.includes('zksync') || c.includes('linea') || c.includes('scroll') ||
+    c.includes('blast') || c.includes('mode') || c.includes('polygon') || c.includes('zora')
+  ) return 1;
+  if (c.includes('binance') || c.includes('bsc') || c.includes('bnb')) return 0.5;
+  if (c.includes('solana')) return 0.1;
+  if (c.includes('avalanche')) return 0.5;
+  return 2;
+}
+
+/** What a deposit nets after the plan's priced transactions and slippage: the working capital
+ *  a farmer actually puts to work, not the headline deposit. */
+function netOf(deposit: number, chain: string): { gas: number; slippage: number; net: number } {
+  const gas = PRICED_TXS * gasPerTx(chain);
+  const slippage = Math.round(deposit * SLIPPAGE_SHARE * 100) / 100;
+  return { gas, slippage, net: Math.round(deposit - gas - slippage) };
+}
+
+/** A dollar amount with thousands separators, for plan text. */
+function usd(n: number): string {
+  return n.toLocaleString('en-US');
 }
 
 /** How long to hold, from the protocol's age: younger protocols get a longer qualifying window. */
@@ -325,19 +480,20 @@ function holdDaysFor(age: number | null): number {
 function mainAction(p: SnapshotProtocol, capital: number, chain: string): string {
   const c = (p.category ?? '').toLowerCase();
   const name = p.name;
-  if (c.includes('lend') || c.includes('cdp') || c.includes('collateral')) return `Supply $${capital} of USDC to ${name} on ${chain} and keep the position open.`;
-  if (c.includes('dex') || c.includes('yield') || c.includes('leveraged farm')) return `Provide $${capital} of liquidity to ${name}'s main pool on ${chain} and keep the position open.`;
-  if (c.includes('bridge')) return `Bridge $${capital} of USDC to ${chain} through ${name} and use the bridged funds in its app.`;
-  if (c.includes('staking') || c.includes('restak')) return `Stake $${capital} of the chain's staking asset through ${name} and keep the receipt.`;
-  if (c.includes('perpetual') || c.includes('derivative')) return `Deposit $${capital} of USDC as margin on ${name} and open one small hedge.`;
-  if (c.includes('prediction')) return `Fund $${capital} and place one market position on ${name}.`;
-  if (c.includes('curator') || c.includes('allocator')) return `Deposit $${capital} into a ${name} vault on ${chain} and keep the shares.`;
-  if (c.includes('stable')) return `Mint or deposit $${capital} of the stable asset through ${name} on ${chain}.`;
-  if (c.includes('rwa')) return `Mint $${capital} of the protocol's yield asset on ${chain} and hold it.`;
-  if (c.includes('insurance')) return `Buy $${capital} of cover from ${name} on ${chain} and keep the policy.`;
-  if (c.includes('basis')) return `Deposit $${capital} into ${name}'s basis position on ${chain} and hold it through one funding cycle.`;
-  if (c.includes('privacy')) return `Use $${capital} through ${name}'s private flow on ${chain} and keep the receipt.`;
-  return `Deposit $${capital} of USDC into ${name} on ${chain} and keep the position open.`;
+  const amt = usd(capital);
+  if (c.includes('lend') || c.includes('cdp') || c.includes('collateral')) return `Supply $${amt} of USDC to ${name} on ${chain} and keep the position open.`;
+  if (c.includes('dex') || c.includes('yield') || c.includes('leveraged farm')) return `Provide $${amt} of liquidity to ${name}'s main pool on ${chain} and keep the position open.`;
+  if (c.includes('bridge')) return `Bridge $${amt} of USDC to ${chain} through ${name} and use the bridged funds in its app.`;
+  if (c.includes('staking') || c.includes('restak')) return `Stake $${amt} of the chain's staking asset through ${name} and keep the receipt.`;
+  if (c.includes('perpetual') || c.includes('derivative')) return `Deposit $${amt} of USDC as margin on ${name} and open one small hedge.`;
+  if (c.includes('prediction')) return `Fund $${amt} and place one market position on ${name}.`;
+  if (c.includes('curator') || c.includes('allocator')) return `Deposit $${amt} into a ${name} vault on ${chain} and keep the shares.`;
+  if (c.includes('stable')) return `Mint or deposit $${amt} of the stable asset through ${name} on ${chain}.`;
+  if (c.includes('rwa')) return `Mint $${amt} of the protocol's yield asset on ${chain} and hold it.`;
+  if (c.includes('insurance')) return `Buy $${amt} of cover from ${name} on ${chain} and keep the policy.`;
+  if (c.includes('basis')) return `Deposit $${amt} into ${name}'s basis position on ${chain} and hold it through one funding cycle.`;
+  if (c.includes('privacy')) return `Use $${amt} through ${name}'s private flow on ${chain} and keep the receipt.`;
+  return `Deposit $${amt} of USDC into ${name} on ${chain} and keep the position open.`;
 }
 
 /** A second, category-specific signal: one repeat action that shows the farmer is a real user,
@@ -360,47 +516,56 @@ function extraSignal(p: SnapshotProtocol, chain: string): string {
 }
 
 /**
- * A protocol's farm plan: seven steps, each an action with a cost and a time. The plan is
- * derived from the protocol's own record (category, chains, TVL, age), never from a hand-written
- * list of names.
+ * A protocol's farm plan: eight steps, day by day, sized for two deposits and netted of
+ * costs. Step two sizes the deposit — $1,000 standard, $10,000 large — and step three shows
+ * what each size actually puts to work after gas on the protocol's own chain and 0.3%
+ * slippage, so a reader sees the net, not the headline. The plan is derived from the
+ * protocol's own record (category, chains, age), never from a hand-written list of names.
  */
 export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const chain = chainOf(p);
-  const capital = capitalFor(p);
   const hold = holdDaysFor(age);
+  const gas = gasPerTx(chain);
+  const std = netOf(STANDARD_DEPOSIT_USD, chain);
+  const large = netOf(LARGE_DEPOSIT_USD, chain);
   return [
     {
-      text: `Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.`,
+      text: `Day 0 — set up a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.`,
       cost: 'under $3 of gas for the first transaction',
       time: '5 minutes',
     },
     {
-      text: mainAction(p, capital, chain),
-      cost: `$${capital} of capital and about $${capital >= 150 ? 8 : 4} of gas`,
+      text: `Day 1 — ${mainAction(p, STANDARD_DEPOSIT_USD, chain)} The same steps size a $${usd(LARGE_DEPOSIT_USD)} large deposit.`,
+      cost: `$${usd(STANDARD_DEPOSIT_USD)} of capital ($${usd(LARGE_DEPOSIT_USD)} for the large size) and about $${gas} of gas`,
       time: '15 minutes to set up',
     },
     {
-      text: `Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote.`,
-      cost: 'about $2 of gas a week',
-      time: '10 minutes a week',
+      text: `Day 1 — check the net position on ${chain}: a $${usd(STANDARD_DEPOSIT_USD)} deposit nets about $${usd(std.net)} of working capital after ~$${std.gas} of gas across four transactions and 0.3% slippage; a $${usd(LARGE_DEPOSIT_USD)} deposit nets about $${usd(large.net)}. Costs are estimates for ${chain}, not a quote.`,
+      cost: `about $${std.gas} of gas and $${std.slippage} of slippage on the standard size`,
+      time: '5 minutes',
     },
     {
-      text: extraSignal(p, chain),
-      cost: 'about $2 of gas',
+      text: `Days 2–7 — make one qualifying action a day in the first week, such as a deposit, a borrow, a swap or a vote, so the wallet reads as active from day one.`,
+      cost: `about $${gas} of gas a day`,
+      time: '10 minutes a day',
+    },
+    {
+      text: `Day 8 — ${extraSignal(p, chain)}`,
+      cost: `about $${gas} of gas`,
       time: '10 minutes',
     },
     {
-      text: `Hold the position for at least ${hold} days so the activity is counted in more than one snapshot.`,
-      cost: `the $${capital} stays in the position`,
-      time: `${hold} days`,
+      text: `Days 9–${hold} — hold the position and make one qualifying action a week, so the activity is counted in more than one snapshot.`,
+      cost: `the deposit stays in the position, about $${gas} of gas a week`,
+      time: `${hold} days in total`,
     },
     {
-      text: `Before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes.`,
+      text: `Day ${hold + 1} — before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes.`,
       cost: 'no fee to check, and never pay to claim',
       time: '10 minutes',
     },
     {
-      text: `Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.`,
+      text: `Keep a farm log: the wallet, the dates, every transaction and the net position, so you can repeat the position or unwind it.`,
       cost: 'nothing but the log',
       time: '5 minutes',
     },
@@ -463,6 +628,7 @@ export interface RadarData {
   model: ModelConstants;
   model_version: string;
   comparables: { global: number; by_category: Record<string, number> };
+  validation: ValidationReport;
   watchlist_size: number;
   board_size: number;
   early_size: number;
@@ -498,6 +664,7 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
   const comp = comparables(snapshot);
   const board = buildBoard(snapshot, comp);
   const live = liveRows(snapshot);
+  const validation = validateModel(snapshot);
   const watch = new Set(snapshot.watchlist);
   const early = board.filter((r) => !watch.has(r.slug)).length;
   const radar: RadarData = {
@@ -507,6 +674,7 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     model: MODEL,
     model_version: MODEL_VERSION,
     comparables: { global: round4(comp.global), by_category: Object.fromEntries(Object.entries(comp.byCategory).map(([k, v]) => [k, round4(v)])) },
+    validation,
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     early_size: early,
