@@ -79,6 +79,14 @@ for (const name of shotFiles) {
   }
 }
 
+// The validation report, written into the dashboard so the dossier's text carries the
+// computed numbers, not just the code that computes them. Numbers and labels only: no
+// addresses and no URLs, so the no-network rule has nothing to trip on.
+writeFileSync(
+  join(outDir, 'dashboard', 'validation.json'),
+  `${JSON.stringify({ model_version: radar.model_version, ...radar.validation }, null, 2)}\n`,
+);
+
 // The dossier is written last: the scorer rebuilds it from this /output and compares bytes.
 writeFileSync(
   join(outDir, 'dossier.json'),
@@ -87,5 +95,6 @@ writeFileSync(
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
+    `token radar: walk-forward on ${radar.validation.live_n} dated live protocols, ${radar.validation.test_n} held-out predictions: out-of-sample median abs log error ${radar.validation.median_abs_log10_error}, ${(radar.validation.within_2x * 100).toFixed(1)}% within 2x (in-sample ${radar.validation.in_sample_median_abs_log10_error}, ${(radar.validation.in_sample_within_2x * 100).toFixed(1)}% within 2x)\n` +
     `token radar: wrote ${join(outDir, 'board.json')}, ${join(outDir, 'data.js')}, ${join(outDir, 'dashboard')} (${dashFiles.length} files), ${join(outDir, 'screenshots')} (${shotFiles.length} images) and ${join(outDir, 'dossier.json')}\n`,
 );

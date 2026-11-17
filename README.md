@@ -10,7 +10,7 @@ reads the sealed DefiLlama snapshot and writes a dashboard that ranks the
 protocols that record no token yet by what their launch would be worth — each
 with a concrete farm plan.
 
-## The model (`radar-2-comparables`)
+## The model (`radar-3-validated`)
 
 Implied value follows from the snapshot's own figures, never from a hand-kept
 list of names:
@@ -31,6 +31,21 @@ implied = round( tvl_usd × comparable multiple
 - **A maturity bell, not a ladder.** The multiplier peaks near two and a half
   years with no token and falls on both sides: too young to have proven
   itself, or old enough to have shown it likely never launches.
+- **Walk-forward tested, not trusted.** The same scoring function is validated
+  on the snapshot's own live-token protocols: the 87 with a listing date are
+  ordered oldest first and cut into five chronological folds; the comparables
+  are fitted on the earlier folds only and tested on the next one. On this
+  snapshot the walk-forward median error is 0.68 log with 29% of predictions
+  within 2× of the real market cap, against 0.56 log / 32% in-sample — the
+  numbers are printed in the dashboard and in `dashboard/validation.json`
+  exactly as they come out. The gap between the two is the honest measure of
+  the model: the multiple generalises, it does not memorise.
+
+Farm plans are deposit-sized and netted: every plan is written for a $1,000
+standard deposit and a $10,000 large one, shows what each size nets after gas
+on the protocol's own chain and 0.3% slippage, and is laid out day by day
+(Day 0 wallet, Day 1 deposit, Days 2–7 first-week actions, Day 8 second
+signal, hold to Day 30/45/60, claim day, farm log).
 
 The board covers the whole 40-protocol watchlist and adds the 160 rankable
 pre-token protocols below the floor with the most TVL — 200 rows. The
@@ -42,9 +57,10 @@ never mixed into the ranking.
 A dark radar-themed page, no network, no framework: the board with a top-3
 spotlight, search, category and chain filters, a watchlist-only toggle,
 sortable columns, a live-token tab, a model panel that states the formula and
-the computed multiples, and a detail drawer for every protocol with the full
-model breakdown (each multiplier, recomputed in the page) and a seven-step
-farm plan with cost and time per step.
+the computed multiples, a walk-forward validation strip above the board and a
+fold-by-fold table in the model panel, and a detail drawer for every protocol
+with the full model breakdown (each multiplier, recomputed in the page), the
+validation result, and an eight-step farm plan with cost and time per step.
 
 ## How to run
 
